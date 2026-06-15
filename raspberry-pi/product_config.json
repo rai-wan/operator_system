@@ -1,0 +1,27 @@
+{
+    "_comment": "Konfigurasi jumlah item yang wajib ada dalam box per kode produk",
+    "_note": "Konfigurasi ini bisa di-override dari Laravel via POST /config",
+
+    "DEFAULT": {
+        "required_count": 2,
+        "items": ["Unit Utama", "Aksesori"]
+    },
+
+    "PROD-001": {
+        "product_name": "Smartphone X",
+        "required_count": 3,
+        "items": ["Unit Utama", "Charger", "Buku Manual"]
+    },
+
+    "PROD-002": {
+        "product_name": "Earphone Pro",
+        "required_count": 2,
+        "items": ["Unit Utama", "Pouch Case"]
+    },
+
+    "PROD-003": {
+        "product_name": "Smart Watch",
+        "required_count": 4,
+        "items": ["Unit Utama", "Charger", "Strap Cadangan", "Buku Manual"]
+    }
+}

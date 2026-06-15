@@ -1,0 +1,19 @@
+# ================================
+# ProTrack Vision Server
+# Dependencies untuk Raspberry Pi
+# ================================
+
+# Web server
+flask>=2.3.0
+flask-cors>=4.0.0
+
+# Computer Vision & Image Processing
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+pillow>=10.0.0
+
+# Serial communication for UART camera
+pyserial>=3.5
+
+# HTTP requests (untuk komunikasi ke Laravel)
+requests>=2.31.0
