@@ -479,7 +479,7 @@ body {
                     <option value="Ganti Model">Set Up / Ganti Model</option>
                     <option value="Istirahat / Sholat">Istirahat / Sholat</option>
                     <option value="QC Check">QC Check</option>
-                    <option value="Listrik Mati">Listrik / Utilitas</option>
+                    <option value="Listrik Mati">Listrik / Power Trip / Utilitas</option>
                     <option value="Lainnya">Lainnya...</option>
                 </select>
             </div>
