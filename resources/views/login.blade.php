@@ -235,7 +235,7 @@ select.input-field {
         </div>
 
         <div class="input-group">
-            <label>Station (Mesin)</label>
+            <label>Station (Mesin)</label> 
             <select name="station" class="input-field" required>
                 <option value="" disabled selected>-- Pilih Station --</option>
                 <option value="insert">Station Insert</option>
@@ -244,7 +244,7 @@ select.input-field {
             </select>
         </div>
 
-        <button type="submit" class="btn-login">Mulai Sesi</button>
+        <button type="submit" class="btn-login">Mulai Seesi</button>
     </form>
 </div>
 
