@@ -123,4 +123,10 @@ return [
         'store' => env('APP_MAINTENANCE_STORE', 'database'),
     ],
 
+    'api_url' => env('API_URL', 'http://127.0.0.1:8001'),
+
+    'raspberry_pi_ip' => env('RASPBERRY_PI_IP', '127.0.0.1'),
+    'raspberry_pi_port' => env('RASPBERRY_PI_PORT', '5000'),
+    'vision_required_count' => (int) env('VISION_REQUIRED_COUNT', 2),
+
 ];

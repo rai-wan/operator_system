@@ -17,8 +17,8 @@ class VisionController extends Controller
      */
     private function piUrl(string $path = ''): string
     {
-        $ip   = env('RASPBERRY_PI_IP', '192.168.1.100');
-        $port = env('RASPBERRY_PI_PORT', '5000');
+        $ip   = config('app.raspberry_pi_ip');
+        $port = config('app.raspberry_pi_port');
         return "http://{$ip}:{$port}{$path}";
     }
 
@@ -42,7 +42,7 @@ class VisionController extends Controller
                 'is_complete'  => false,
                 'scan_allowed' => false,
                 'item_count'   => 0,
-                'required_count' => env('VISION_REQUIRED_COUNT', 2),
+                'required_count' => config('app.vision_required_count'),
                 'error'        => 'Pi server merespons dengan error: ' . $response->status(),
             ]);
 
@@ -53,7 +53,7 @@ class VisionController extends Controller
                 'is_complete'  => false,
                 'scan_allowed' => false,
                 'item_count'   => 0,
-                'required_count' => env('VISION_REQUIRED_COUNT', 2),
+                'required_count' => config('app.vision_required_count'),
                 'error'        => 'Tidak dapat terhubung ke Raspberry Pi: ' . $e->getMessage(),
             ]);
         }
@@ -74,7 +74,7 @@ class VisionController extends Controller
 
         // Tambahkan default required_count dari env jika tidak dikirim
         if (!isset($data['required_count'])) {
-            $data['required_count'] = (int) env('VISION_REQUIRED_COUNT', 2);
+            $data['required_count'] = (int) config('app.vision_required_count');
         }
 
         try {
@@ -111,8 +111,8 @@ class VisionController extends Controller
      */
     public function streamUrl()
     {
-        $ip   = env('RASPBERRY_PI_IP', '192.168.1.100');
-        $port = env('RASPBERRY_PI_PORT', '5000');
+        $ip   = config('app.raspberry_pi_ip');
+        $port = config('app.raspberry_pi_port');
         return response()->json([
             'url' => "http://{$ip}:{$port}/stream",
         ]);
@@ -133,6 +133,23 @@ class VisionController extends Controller
                 'camera' => false,
                 'error'  => 'Pi tidak terjangkau.',
             ]);
+        }
+    }
+
+    /**
+     * POST /vision/tare
+     * Jalankan tare (zeroing) pada timbangan.
+     */
+    public function tare(Request $request)
+    {
+        try {
+            $response = Http::timeout(3)->post($this->piUrl('/tare'));
+            return response()->json($response->json());
+        } catch (\Exception $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Gagal tare timbangan: ' . $e->getMessage(),
+            ], 500);
         }
     }
 }

@@ -20,7 +20,7 @@ class OperatorController extends Controller
             'station' => 'required'
         ]);
         
-        $api = env('API_URL', 'http://127.0.0.1:8000');
+        $api = config('app.api_url');
         
         try {
             $response = \Illuminate\Support\Facades\Http::post($api.'/api/operator/cek-id', [
@@ -64,7 +64,7 @@ class OperatorController extends Controller
 
     public function insertProses(Request $request)
     {
-        $api = env('API_URL');
+        $api = config('app.api_url');
 
         $response = \Illuminate\Support\Facades\Http::post($api.'/api/operator/insert', [
             'kode_produk' => $request->produk,
@@ -87,7 +87,7 @@ class OperatorController extends Controller
 
     public function timbangProses(Request $request)
     {
-        $api = env('API_URL');
+        $api = config('app.api_url');
         $response = \Illuminate\Support\Facades\Http::post($api.'/api/operator/timbang', [
             'kode_produk' => $request->produk,
             'berat' => $request->berat,
@@ -110,7 +110,7 @@ class OperatorController extends Controller
 
     public function packingProses(Request $request)
     {
-        $api = env('API_URL');
+        $api = config('app.api_url');
         $response = \Illuminate\Support\Facades\Http::post($api.'/api/operator/packing', [
             'kode_produk' => $request->produk
         ]);

@@ -649,26 +649,21 @@ function runLocalDetectionLoop() {
             ctx.fillText(`#${idx + 1}`, blob.x, blob.y - 8);
         });
         
-        // 6. Logika Stabilisasi Count (harus stabil selama 1.5 detik)
+        // 6. Logika Stabilisasi Count (cukup terdeteksi >= target selama 1 detik)
         if (count >= requiredCount) {
-            if (count === lastLocalCount) {
-                if (localStableStart === null) {
-                    localStableStart = Date.now();
-                }
-                const elapsed = (Date.now() - localStableStart) / 1000;
-                if (elapsed >= 1.5) {
-                    localIsComplete = true;
-                }
-            } else {
-                localStableStart = null;
-                localIsComplete = false;
-                lastLocalCount = count;
+            if (localStableStart === null) {
+                localStableStart = Date.now();
+            }
+            const elapsed = (Date.now() - localStableStart) / 1000;
+            if (elapsed >= 1.0) {
+                localIsComplete = true;
             }
         } else {
             localStableStart = null;
             localIsComplete = false;
-            lastLocalCount = count;
         }
+        lastLocalCount = count;
+        
         
         // 7. Update UI dengan mock status data agar sinkron dengan HTML
         const mockData = {
@@ -727,7 +722,7 @@ function detectLocalBlobs(ctx, width, height, roiX, roiY, roiW, roiH) {
     const avg = sum / (roiW * roiH);
     
     // 2. Thresholding: beri tanda pixel kontras tinggi (dibanding rata-rata)
-    const threshold = 35; // sensitivitas deteksi
+    const threshold = 60; // sensitivitas deteksi (makin tinggi makin kurang sensitif)
     const binary = new Uint8Array(roiW * roiH);
     for (let i = 0; i < gray.length; i++) {
         binary[i] = Math.abs(gray[i] - avg) > threshold ? 1 : 0;
@@ -776,7 +771,7 @@ function detectLocalBlobs(ctx, width, height, roiX, roiY, roiW, roiH) {
                 }
                 
                 // Filter berdasarkan ukuran blob (agar noise kecil & background besar terabaikan)
-                if (count > 80 && count < (roiW * roiH * 0.4)) {
+                if (count > 400 && count < (roiW * roiH * 0.4)) {
                     blobs.push({
                         x: minX + roiX,
                         y: minY + roiY,

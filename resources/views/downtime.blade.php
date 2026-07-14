@@ -836,8 +836,8 @@ function initWhenReady() {
 initWhenReady();
 </script>
 
-<!-- Chart.js loaded at end of body for fast first paint -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- Chart.js lokal — tidak membutuhkan internet -->
+<script src="/js/chart.umd.min.js"></script>
 
 </body>
 </html>

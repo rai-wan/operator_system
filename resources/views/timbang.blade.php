@@ -212,6 +212,8 @@ input:focus{
         <div class="step" style="margin-top:15px; color:#475569;" id="beratLabel">Input Berat Aktual (Kg)</div>
         <input type="number" id="beratInput" placeholder="0.00" step="0.01" style="font-size:24px; font-weight:bold; color:#0ea5e9;">
 
+        <button id="tareBtn" style="width:100%; margin-top:15px; padding:12px; border-radius:10px; background:#475569; color:white; font-weight:600; border:none; cursor:pointer; font-size:14px; transition:0.3s;">Zero / Tare Timbangan</button>
+
         <div class="status" id="statusText"></div>
 
     </div>
@@ -233,10 +235,99 @@ document.addEventListener('keydown', function(e){
 });
 
 // ==========================
-// INISIALISASI
+// INISIALISASI & POLLING TIMBANGAN (MOVING AVERAGE + LOCK 30 DETIK)
 // ==========================
 const inputBox = document.getElementById('inputBox');
 document.getElementById('scanInput').focus();
+const beratInput = document.getElementById('beratInput');
+
+// Buffer untuk kalkulasi rata-rata berat (Moving Average 5 data terakhir)
+const weightBuffer = [];
+const BUFFER_SIZE = 5;
+let weightLocked = false;
+let lockTimer = null;
+let lockedWeight = null;
+
+// Fungsi tambah data ke buffer rata-rata
+function addToBuffer(val) {
+    weightBuffer.push(val);
+    if (weightBuffer.length > BUFFER_SIZE) {
+        weightBuffer.shift();
+    }
+}
+
+// Fungsi hitung rata-rata dari buffer
+function getAverage() {
+    if (weightBuffer.length === 0) return 0;
+    const sum = weightBuffer.reduce((a, b) => a + b, 0);
+    return sum / weightBuffer.length;
+}
+
+// Fungsi kunci berat dan mulai timer 30 detik
+function lockWeight(weight) {
+    weightLocked = true;
+    lockedWeight = weight;
+    beratInput.value = weight.toFixed(2);
+    beratInput.style.backgroundColor = "#e0f2fe";
+    beratInput.style.borderColor = "#0ea5e9";
+    document.getElementById('scanInput').focus();
+    statusText.innerHTML = "<span class='info'>Berat terkunci: " + weight.toFixed(2) + " Kg &mdash; Silakan scan barcode (30 detik)</span>";
+
+    // Reset timer lama jika ada, mulai timer baru 30 detik
+    if (lockTimer) clearTimeout(lockTimer);
+    lockTimer = setTimeout(() => {
+        resetWeightLock();
+        statusText.innerHTML = "<span class='error'>Waktu scan habis (30 detik). Berat direset.</span>";
+        setTimeout(() => { statusText.innerHTML = ""; }, 2500);
+    }, 30000);
+}
+
+// Fungsi lepas kunci berat
+function resetWeightLock() {
+    weightLocked = false;
+    lockedWeight = null;
+    weightBuffer.length = 0;
+    beratInput.value = "";
+    beratInput.style.backgroundColor = "";
+    beratInput.style.borderColor = "";
+    if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
+    document.getElementById('scanInput').focus();
+}
+
+// Polling data berat secara real-time (setiap 250ms)
+const POLL_INTERVAL_MS = 250;
+setInterval(() => {
+    // Jika berat sudah terkunci, tidak perlu polling lagi
+    if (weightLocked) return;
+
+    fetch('/vision/status?_t=' + Date.now())
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok && data.weight !== undefined) {
+                const currentWeight = data.weight;
+
+                // Tambahkan ke buffer rata-rata
+                addToBuffer(currentWeight);
+                const avgWeight = getAverage();
+
+                // Tampilkan nilai rata-rata di UI (bukan raw value langsung)
+                if (document.activeElement !== beratInput) {
+                    beratInput.value = avgWeight.toFixed(2);
+                }
+
+                // Kunci berat jika rata-rata sudah stabil (buffer sudah penuh & berat >= 0.5 Kg)
+                if (weightBuffer.length >= BUFFER_SIZE && avgWeight >= 0.5) {
+                    const min = Math.min(...weightBuffer);
+                    const max = Math.max(...weightBuffer);
+                    // Kunci jika selisih max-min dalam buffer <= 0.2 Kg (stabil)
+                    if ((max - min) <= 0.2) {
+                        lockWeight(avgWeight);
+                    }
+                }
+            }
+        })
+        .catch(() => {});
+}, POLL_INTERVAL_MS);
 
 // ==========================
 // SCAN SYSTEM
@@ -244,7 +335,6 @@ document.getElementById('scanInput').focus();
 let kodeProduk = '';
 
 const input = document.getElementById('scanInput');
-const beratInput = document.getElementById('beratInput');
 const stepText = document.getElementById('stepText');
 const statusText = document.getElementById('statusText');
 
@@ -253,7 +343,8 @@ input.addEventListener('keypress', function(e){
         e.preventDefault();
 
         kodeProduk = input.value.trim();
-        let berat = parseFloat(beratInput.value);
+        // Gunakan berat terkunci atau nilai manual yang ada di kolom
+        let berat = weightLocked ? lockedWeight : parseFloat(beratInput.value);
 
         if(!kodeProduk){
             statusText.innerHTML = "<span class='error'>Produk kosong</span>";
@@ -265,9 +356,9 @@ input.addEventListener('keypress', function(e){
             return;
         }
 
-        // Validasi berat: 1kg +/- 0.5kg
+        // Validasi berat: 1kg - 3kg
         let keterangan = "OK";
-        if(berat < 0.5 || berat > 1.5) {
+        if(berat < 1.0 || berat > 3.0) {
             keterangan = "NG";
         }
 
@@ -297,9 +388,9 @@ function kirimData(berat, keterangan){
     .then(res => {
         if(res.success){
             if(keterangan === 'OK') {
-                statusText.innerHTML = "<span class='success'>Timbang OK (" + berat + " kg)</span>";
+                statusText.innerHTML = "<span class='success'>Timbang OK (" + berat.toFixed(2) + " kg)</span>";
             } else {
-                statusText.innerHTML = "<span class='error'>NG: Timbang " + berat + " kg (Toleransi 0.5 - 1.5 kg)</span>";
+                statusText.innerHTML = "<span class='error'>NG: Timbang " + berat.toFixed(2) + " kg (Toleransi 1.0 - 3.0 kg)</span>";
             }
         }else{
             statusText.innerHTML = "<span class='error'>Gagal Simpan</span>";
@@ -313,18 +404,45 @@ function kirimData(berat, keterangan){
 }
 
 // ==========================
-// RESET
+// RESET FORM SETELAH KIRIM DATA
 // ==========================
 function resetForm(){
-    setTimeout(()=>{
-        kodeProduk = '';
-        input.value = '';
-        beratInput.value = '';
-        input.focus();
-        statusText.innerHTML = "";
+    kodeProduk = '';
+    input.value = '';
+    resetWeightLock();
 
-    },2500);
+    // Tunda penghapusan teks status OK/NG agar operator sempat membacanya
+    setTimeout(() => {
+        statusText.innerHTML = "";
+    }, 2000);
 }
+
+// ==========================
+// EVENT TARE (ZEROING)
+// ==========================
+document.getElementById('tareBtn').addEventListener('click', function() {
+    statusText.innerHTML = "<span class='info'>Menjalankan Tare (Zeroing)...</span>";
+    resetWeightLock();
+
+    fetch('/vision/tare', {
+        method: 'POST',
+        headers: {
+            'X-CSRF-TOKEN': '{{ csrf_token() }}'
+        }
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.ok) {
+            statusText.innerHTML = "<span class='success'>Timbangan berhasil di-Zero (Offset: " + Math.round(data.offset) + ")</span>";
+            setTimeout(() => { statusText.innerHTML = ""; }, 2500);
+        } else {
+            statusText.innerHTML = "<span class='error'>Gagal Zeroing</span>";
+        }
+    })
+    .catch(() => {
+        statusText.innerHTML = "<span class='error'>Koneksi error</span>";
+    });
+});
 
 </script>
 

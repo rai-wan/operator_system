@@ -24,6 +24,8 @@ from flask import Flask, jsonify, Response, request
 from flask_cors import CORS
 from datetime import datetime
 import os
+import gc
+import statistics
 
 # Import serial (untuk kamera UART)
 try:
@@ -40,8 +42,23 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+# Import GPIO (untuk timbangan HX711)
+try:
+    import RPi.GPIO as GPIO  # type: ignore
+    GPIO_AVAILABLE = True
+except ImportError:
+    GPIO_AVAILABLE = False
+    print("[WARN] RPi.GPIO tidak tersedia. Driver timbangan dinonaktifkan.")
+
 app = Flask(__name__)
 CORS(app)
+
+@app.after_request
+def add_header(response):
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 # ============================================================
 # KONFIGURASI
@@ -52,6 +69,7 @@ CONFIG = {
     "server_host": "0.0.0.0",
 
     # Kamera UART Serial
+    "use_serial_camera": False,      # Set True jika memakai kamera serial UART VC0706
     "serial_port": "/dev/serial0",   # Port UART GPIO Pi (Pin 8 & 10)
     "serial_baud": 38400,            # Baud rate default VC0706
     "serial_timeout": 3,
@@ -61,7 +79,7 @@ CONFIG = {
 
     # IP Camera (Aplikasi HP IP Webcam, e.g. "http://192.168.100.50:8080/video")
     # Atur ke None jika ingin memakai kamera serial atau USB bawaan.
-    "ip_camera_url": "http://192.168.100.3:8080/video",
+    "ip_camera_url": None,
 
     # Resolusi capture
     "capture_width":  640,
@@ -81,6 +99,9 @@ CONFIG = {
 
     # FPS stream
     "stream_fps": 10,
+
+    # Timbangan (HX711)
+    "scale_calibration": 148295.0,  # Nilai kalibrasi: (Raw - Offset) / Scale
 }
 
 # ============================================================
@@ -96,6 +117,8 @@ state = {
     "error":          None,
     "annotated_frame": None,
     "product_config": None,
+    "weight":         0.0,
+    "raw_weight":     0,
     "lock":           threading.Lock(),
 }
 
@@ -217,6 +240,85 @@ class SerialCamera:
             self.ser.close()
 
 
+import subprocess
+
+class LibcameraCamera:
+    """Driver untuk Raspberry Pi CSI Camera menggunakan subprocess rpicam-vid"""
+    def __init__(self, width=640, height=480, fps=10):
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.process = None
+        self.running = False
+        self.thread = None
+        self.last_frame = None
+        self.lock = threading.Lock()
+
+    def connect(self):
+        try:
+            cmd = [
+                "rpicam-vid",
+                "--timeout", "0",
+                "--width", str(self.width),
+                "--height", str(self.height),
+                "--codec", "mjpeg",
+                "--inline",
+                "--framerate", str(self.fps),
+                "-o", "-",
+                "-n"
+            ]
+            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+            self.running = True
+            self.thread = threading.Thread(target=self._read_loop, daemon=True)
+            self.thread.start()
+            print("[LIBCAMERA] Driver rpicam-vid berhasil dijalankan")
+            return True
+        except Exception as e:
+            print(f"[LIBCAMERA] Gagal menjalankan rpicam-vid: {e}")
+            return False
+
+    def _read_loop(self):
+        buffer = b""
+        while self.running:
+            try:
+                chunk = self.process.stdout.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                
+                a = buffer.find(b"\xff\xd8")
+                b = buffer.find(b"\xff\xd9")
+                while a != -1 and b != -1 and b > a:
+                    jpg = buffer[a:b+2]
+                    buffer = buffer[b+2:]
+                    
+                    arr = np.frombuffer(jpg, dtype=np.uint8)
+                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        with self.lock:
+                            self.last_frame = frame.copy()
+                            
+                    a = buffer.find(b"\xff\xd8")
+                    b = buffer.find(b"\xff\xd9")
+            except Exception as e:
+                time.sleep(0.1)
+
+    def capture_frame(self):
+        with self.lock:
+            if self.last_frame is not None:
+                return self.last_frame.copy()
+        return None
+
+    def close(self):
+        self.running = False
+        if self.process:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+
+
 # ============================================================
 # DETEKSI OBJEK (OpenCV)
 # ============================================================
@@ -245,8 +347,12 @@ def detect_objects(frame):
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    valid = [c for c in contours
-             if CONFIG["min_object_area"] < cv2.contourArea(c) < CONFIG["max_object_area"]]
+
+    # Filter berdasarkan area lalu ambil MAKSIMAL 2 OBJEK TERBESAR saja
+    valid_all = [c for c in contours
+                 if CONFIG["min_object_area"] < cv2.contourArea(c) < CONFIG["max_object_area"]]
+    valid_all.sort(key=cv2.contourArea, reverse=True)  # Urutkan dari yang terbesar
+    valid = valid_all[:2]  # Ambil hanya 2 terbesar
 
     annotated = frame.copy()
     cv2.rectangle(annotated, (rx, ry), (rx+rw, ry+rh), (255, 140, 0), 2)
@@ -308,7 +414,7 @@ def camera_thread():
             print("[CAMERA] IP Camera gagal terhubung.")
 
     # ---- Coba kamera UART Serial jika IP Camera tidak aktif/gagal ----
-    if usb_cap is None and SERIAL_AVAILABLE:
+    if usb_cap is None and SERIAL_AVAILABLE and CONFIG.get("use_serial_camera", False):
         print(f"[CAMERA] Mencoba UART Serial: {CONFIG['serial_port']}...")
         cam = SerialCamera(CONFIG["serial_port"], CONFIG["serial_baud"])
         if cam.connect():
@@ -321,26 +427,36 @@ def camera_thread():
             cam = None
             print("[CAMERA] UART gagal. Coba USB camera...")
 
-    # ---- Fallback ke USB camera (jika IP Cam dan UART Cam gagal) ----
+    # ---- Fallback ke Native Libcamera / USB camera (jika IP Cam dan UART Cam gagal) ----
     if usb_cap is None and cam is None:
-        print(f"[CAMERA] Mencoba USB Camera index={CONFIG['usb_camera_index']}...")
-        usb_cap = cv2.VideoCapture(CONFIG["usb_camera_index"], cv2.CAP_V4L2)
-        if usb_cap.isOpened():
-            usb_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CONFIG["capture_width"])
-            usb_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG["capture_height"])
-            usb_cap.set(cv2.CAP_PROP_FPS,          CONFIG["stream_fps"])
+        print("[CAMERA] Mencoba native libcamera (rpicam-vid)...")
+        native_cam = LibcameraCamera(CONFIG["capture_width"], CONFIG["capture_height"], CONFIG["stream_fps"])
+        if native_cam.connect():
+            cam = native_cam
             with state["lock"]:
                 state["camera_ok"]   = True
-                state["camera_type"] = "usb"
+                state["camera_type"] = "libcamera"
                 state["error"]       = None
-            print("[CAMERA] Mode: USB Camera")
+            print("[CAMERA] Mode: Native Libcamera (rpicam-vid)")
         else:
-            usb_cap = None
-            with state["lock"]:
-                state["camera_ok"] = False
-                state["error"]     = "Tidak ada kamera yang terdeteksi (UART & USB gagal)"
-            print("[CAMERA] ERROR: Tidak ada kamera tersedia!")
-            return
+            print(f"[CAMERA] Native gagal, mencoba USB Camera index={CONFIG['usb_camera_index']}...")
+            usb_cap = cv2.VideoCapture(CONFIG["usb_camera_index"], cv2.CAP_V4L2)
+            if usb_cap.isOpened():
+                usb_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CONFIG["capture_width"])
+                usb_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG["capture_height"])
+                usb_cap.set(cv2.CAP_PROP_FPS,          CONFIG["stream_fps"])
+                with state["lock"]:
+                    state["camera_ok"]   = True
+                    state["camera_type"] = "usb"
+                    state["error"]       = None
+                print("[CAMERA] Mode: USB Camera")
+            else:
+                usb_cap = None
+                with state["lock"]:
+                    state["camera_ok"] = False
+                    state["error"]     = "Tidak ada kamera yang terdeteksi (UART, Native, & USB gagal)"
+                print("[CAMERA] ERROR: Tidak ada kamera tersedia!")
+                return
 
     delay = 1.0 / CONFIG["stream_fps"]
 
@@ -368,6 +484,8 @@ def camera_thread():
             prod_cfg  = state.get("product_config")
             req_count_local = prod_cfg["required_count"] if prod_cfg and "required_count" in prod_cfg else req_count
 
+        # Beri jeda kecil (10ms) agar thread timbangan tidak terganggu GIL / CPU contention
+        time.sleep(0.01)
         count, annotated, _ = detect_objects(frame)
 
         # Logika stabilisasi
@@ -462,6 +580,8 @@ def status():
         stable_since = state["stable_since"]
         prod_cfg     = state.get("product_config")
         last_frame   = state["last_frame_time"]
+        weight       = state.get("weight", 0.0)
+        raw_weight   = state.get("raw_weight", 0)
 
     req_count = CONFIG["required_item_count"]
     if prod_cfg and "required_count" in prod_cfg:
@@ -480,13 +600,49 @@ def status():
         "stable_seconds": stable_dur,
         "product_config": prod_cfg,
         "error":          err,
-        "timestamp":      datetime.now().isoformat()
+        "timestamp":      datetime.now().isoformat(),
+        "weight":         weight,
+        "raw_weight":     raw_weight
     })
 
 @app.route('/stream')
 def stream():
     return Response(generate_stream(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/snapshot')
+def snapshot():
+    """Ambil satu frame terkini sebagai file foto JPEG dan kembalikan ke browser."""
+    import os
+    with state["lock"]:
+        ann = state.get("annotated_frame")
+
+    if ann is None:
+        return jsonify({"ok": False, "error": "Kamera belum aktif / tidak ada frame"}), 503
+
+    # Encode frame ke JPEG
+    ok, buf = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return jsonify({"ok": False, "error": "Gagal encode gambar"}), 500
+
+    # Simpan ke disk agar bisa diakses kembali
+    snapshot_dir = '/tmp/protrack_snapshots'
+    os.makedirs(snapshot_dir, exist_ok=True)
+    filename = datetime.now().strftime('snapshot_%Y%m%d_%H%M%S.jpg')
+    filepath = os.path.join(snapshot_dir, filename)
+    with open(filepath, 'wb') as f:
+        f.write(buf.tobytes())
+    print(f"[SNAPSHOT] Foto disimpan: {filepath}")
+
+    # Kembalikan gambar langsung ke browser
+    return Response(
+        buf.tobytes(),
+        mimetype='image/jpeg',
+        headers={
+            'Content-Disposition': f'inline; filename="{filename}"',
+            'X-Snapshot-File': filepath
+        }
+    )
 
 @app.route('/config', methods=['POST'])
 def set_config():
@@ -510,6 +666,154 @@ def reset():
 
 
 # ============================================================
+# DRIVER TIMBANGAN (HX711) & THREAD
+# ============================================================
+class HX711Driver:
+    def __init__(self, dout=5, sck=6, scale=1000.0):
+        self.dout = dout
+        self.sck = sck
+        self.scale = scale
+        self.offset = 0
+        self.last_raw = 0
+        self.ready = False
+
+    def connect(self):
+        if not GPIO_AVAILABLE:
+            return False
+        try:
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(self.sck, GPIO.OUT)
+            GPIO.setup(self.dout, GPIO.IN)
+            GPIO.output(self.sck, False)
+            self.ready = True
+
+            # Buang beberapa pembacaan pertama - HX711 belum stabil
+            # persis setelah power-up
+            for _ in range(3):
+                self.read_raw()
+                time.sleep(0.05)
+
+            self.tare()
+            print("[SCALE] Driver HX711 berhasil diinisialisasi")
+            return True
+        except Exception as e:
+            print(f"[SCALE] Gagal inisialisasi HX711: {e}")
+            return False
+
+    def read_raw(self):
+        if not self.ready:
+            return None
+
+        for _ in range(200):
+            if GPIO.input(self.dout) == 0:
+                break
+            time.sleep(0.001)
+        else:
+            return None  # Timeout
+
+        # --- CRITICAL SECTION: proteksi dari gangguan thread kamera ---
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+
+        value = 0
+        corrupted = False
+        try:
+            for _ in range(24):
+                t0 = time.perf_counter()
+                GPIO.output(self.sck, True)
+                value = value << 1
+                GPIO.output(self.sck, False)
+                if GPIO.input(self.dout):
+                    value += 1
+                # Kalau 1 siklus clock > 60us, HX711 kemungkinan
+                # sudah power-down di tengah pembacaan -> data korup
+                if (time.perf_counter() - t0) > 0.00006:
+                    corrupted = True
+
+            # Pulsa ke-25 (gain 128, channel A)
+            GPIO.output(self.sck, True)
+            GPIO.output(self.sck, False)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+        # --- END CRITICAL SECTION ---
+
+        if corrupted:
+            return None  # buang sampel yang berpotensi korup
+
+        if value & 0x800000:
+            value -= 0x1000000
+
+        self.last_raw = value
+        return value
+
+    def read_average(self, times=7):
+        """Ambil beberapa sampel lalu buang outlier (median filtering)."""
+        samples = []
+        for _ in range(times):
+            v = self.read_raw()
+            if v is not None:
+                samples.append(v)
+            time.sleep(0.02)
+
+        if not samples:
+            return self.last_raw
+
+        if len(samples) < 3:
+            return sum(samples) / len(samples)
+
+        med = statistics.median(samples)
+        mad = statistics.median([abs(s - med) for s in samples]) or 1
+        filtered = [s for s in samples if abs(s - med) < 5 * mad]
+
+        return sum(filtered) / len(filtered) if filtered else med
+
+    def get_weight(self):
+        val = self.read_average(5)
+        return (val - self.offset) / self.scale
+
+    def tare(self):
+        print("[SCALE] Menjalankan Tare (Zeroing)...")
+        self.offset = self.read_average(20)
+        print(f"[SCALE] Tare selesai. Offset: {self.offset}")
+
+
+hx_sensor = None
+
+def scale_thread():
+    global hx_sensor
+    if not GPIO_AVAILABLE:
+        print("[SCALE] GPIO tidak tersedia. Thread timbangan diabaikan.")
+        return
+
+    print("[SCALE] Memulai thread timbangan...")
+    hx_sensor = HX711Driver(dout=5, sck=6, scale=CONFIG.get("scale_calibration", 1000.0))
+    if hx_sensor.connect():
+        while True:
+            try:
+                weight = hx_sensor.get_weight()
+                raw = hx_sensor.last_raw
+                # Bulatkan ke 2 desimal (presisi 10 gram) untuk kestabilan tampilan
+                weight = round(weight, 2)
+                if weight < 0.02:
+                    weight = 0.0
+                with state["lock"]:
+                    state["weight"] = weight
+                    state["raw_weight"] = raw
+            except Exception as e:
+                print(f"[SCALE] Error read: {e}")
+            time.sleep(0.2)
+
+@app.route('/tare', methods=['POST'])
+def run_tare():
+    global hx_sensor
+    if hx_sensor:
+        hx_sensor.tare()
+        return jsonify({"ok": True, "message": "Scale tared successfully", "offset": hx_sensor.offset})
+    return jsonify({"ok": False, "error": "Scale not initialized"}), 500
+
+
+# ============================================================
 # MAIN
 # ============================================================
 if __name__ == '__main__':
@@ -523,6 +827,10 @@ if __name__ == '__main__':
 
     cam_thread = threading.Thread(target=camera_thread, daemon=True)
     cam_thread.start()
+    
+    scale_thr = threading.Thread(target=scale_thread, daemon=True)
+    scale_thr.start()
+    
     time.sleep(3)
 
     import socket

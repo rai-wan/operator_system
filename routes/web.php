@@ -43,4 +43,5 @@ Route::prefix('vision')->group(function () {
     Route::get('/stream-url', [VisionController::class, 'streamUrl']);
     Route::post('/config',    [VisionController::class, 'sendConfig']);
     Route::post('/reset',     [VisionController::class, 'reset']);
+    Route::post('/tare',      [VisionController::class, 'tare']);
 });

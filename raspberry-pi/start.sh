@@ -46,6 +46,6 @@ hostname -I | tr ' ' '\n' | grep -v '^$' | while read ip; do
 done
 echo ""
 
-# Jalankan server
-echo "[SERVER] Menjalankan pi_vision_server.py..."
-python3 pi_vision_server.py
+# Jalankan server dengan wrapper libcamerify untuk kompatibilitas OpenCV di Bookworm
+echo "[SERVER] Menjalankan pi_vision_server.py dengan libcamerify..."
+libcamerify python3 pi_vision_server.py
