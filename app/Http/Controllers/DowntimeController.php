@@ -34,9 +34,17 @@ class DowntimeController extends Controller
                 ->limit(50)
                 ->get()
                 ->map(function ($item) {
-                    $item->time = Carbon::parse($item->created_at)
-                        ->setTimezone('Asia/Jakarta')
-                        ->format('H:i:s');
+                    if (!empty($item->created_at)) {
+                        try {
+                            $item->time = Carbon::parse($item->created_at)
+                                ->setTimezone('Asia/Jakarta')
+                                ->format('H:i:s');
+                        } catch (\Throwable $e) {
+                            $item->time = isset($item->jam) ? str_pad($item->jam, 2, '0', STR_PAD_LEFT) . ':00:00' : '—';
+                        }
+                    } else {
+                        $item->time = isset($item->jam) ? str_pad($item->jam, 2, '0', STR_PAD_LEFT) . ':00:00' : '—';
+                    }
                     return $item;
                 });
 
@@ -92,8 +100,8 @@ class DowntimeController extends Controller
             $rawCounts = DB::connection(self::DB_CONN)
                 ->table('trackings')
                 ->where('station', $station)
-                ->whereIn(DB::raw('DATE(CONVERT_TZ(created_at, "+00:00", "+07:00"))'), $tanggalList)
-                ->selectRaw('DATE(CONVERT_TZ(created_at, "+00:00", "+07:00")) as tgl, HOUR(CONVERT_TZ(created_at, "+00:00", "+07:00")) as jam, COUNT(*) as total')
+                ->whereIn(DB::raw('DATE(DATE_ADD(created_at, INTERVAL 7 HOUR))'), $tanggalList)
+                ->selectRaw('DATE(DATE_ADD(created_at, INTERVAL 7 HOUR)) as tgl, HOUR(DATE_ADD(created_at, INTERVAL 7 HOUR)) as jam, COUNT(*) as total')
                 ->groupByRaw('tgl, jam')
                 ->get()
                 ->keyBy(fn($r) => $r->tgl . '_' . $r->jam);

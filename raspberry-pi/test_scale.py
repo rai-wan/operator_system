@@ -1,4 +1,5 @@
 import time
+import gc
 import RPi.GPIO as GPIO  # type: ignore
 
 # Gunakan nomor pin GPIO BCM
@@ -20,18 +21,26 @@ def read_raw():
         if timeout <= 0:
             return None # Timeout
 
-    value = 0
-    # Baca 24-bit
-    for _ in range(24):
-        GPIO.output(SCK_PIN, True)
-        value = value << 1
-        GPIO.output(SCK_PIN, False)
-        if GPIO.input(DT_PIN):
-            value += 1
+    # --- CRITICAL SECTION ---
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
 
-    # Pulsa ke-25 untuk menetapkan gain 128
-    GPIO.output(SCK_PIN, True)
-    GPIO.output(SCK_PIN, False)
+    value = 0
+    try:
+        for _ in range(24):
+            GPIO.output(SCK_PIN, True)
+            value = value << 1
+            GPIO.output(SCK_PIN, False)
+            if GPIO.input(DT_PIN):
+                value += 1
+
+        # Pulsa ke-25 untuk menetapkan gain 128
+        GPIO.output(SCK_PIN, True)
+        GPIO.output(SCK_PIN, False)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+    # --- END CRITICAL SECTION ---
 
     # Ubah ke komplemen 2 signed 24-bit
     if value & 0x800000:

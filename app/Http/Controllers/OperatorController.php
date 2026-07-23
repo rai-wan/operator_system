@@ -68,11 +68,16 @@ class OperatorController extends Controller
 
         $response = \Illuminate\Support\Facades\Http::post($api.'/api/operator/insert', [
             'kode_produk' => $request->produk,
-            'kode_part'   => $request->part
+            'kode_part'   => $request->part,
+            'status'      => $request->status,
+            'defect_type' => $request->defect_type,
+            'confidence'  => $request->confidence,
+            'foto'        => $request->foto,
         ]);
 
         return response()->json([
-            'success' => $response->successful()
+            'success' => $response->successful(),
+            'message' => $response->json('message') ?? 'Terjadi kesalahan'
         ]);
     }
 

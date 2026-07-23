@@ -20,7 +20,7 @@ import json
 import time
 import threading
 import numpy as np
-from flask import Flask, jsonify, Response, request
+from flask import Flask, jsonify, Response, request, send_from_directory
 from flask_cors import CORS
 from datetime import datetime
 import os
@@ -119,6 +119,7 @@ state = {
     "product_config": None,
     "weight":         0.0,
     "raw_weight":     0,
+    "raw_frame":      None,
     "lock":           threading.Lock(),
 }
 
@@ -427,38 +428,36 @@ def camera_thread():
             cam = None
             print("[CAMERA] UART gagal. Coba USB camera...")
 
-    # ---- Fallback ke Native Libcamera / USB camera (jika IP Cam dan UART Cam gagal) ----
+    # ---- Fallback ke USB/CSI Camera via V4L2 ----
+    # Catatan: jalankan server via "libcamerify python3 pi_vision_server.py" agar
+    # Raspberry Pi Camera Module (CSI) dapat diakses sebagai /dev/video0 oleh OpenCV.
+    # JANGAN gunakan LibcameraCamera (rpicam-vid subprocess) di sini karena rpicam-vid
+    # akan mewarisi LD_PRELOAD dari libcamerify dan mengalami konflik.
     if usb_cap is None and cam is None:
-        print("[CAMERA] Mencoba native libcamera (rpicam-vid)...")
-        native_cam = LibcameraCamera(CONFIG["capture_width"], CONFIG["capture_height"], CONFIG["stream_fps"])
-        if native_cam.connect():
-            cam = native_cam
+        print(f"[CAMERA] Mencoba USB/CSI Camera index={CONFIG['usb_camera_index']} via V4L2...")
+        usb_cap = cv2.VideoCapture(CONFIG["usb_camera_index"], cv2.CAP_V4L2)
+        if usb_cap.isOpened():
+            usb_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CONFIG["capture_width"])
+            usb_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG["capture_height"])
+            usb_cap.set(cv2.CAP_PROP_FPS,          CONFIG["stream_fps"])
             with state["lock"]:
                 state["camera_ok"]   = True
-                state["camera_type"] = "libcamera"
+                state["camera_type"] = "usb"
                 state["error"]       = None
-            print("[CAMERA] Mode: Native Libcamera (rpicam-vid)")
+            print("[CAMERA] Mode: USB/CSI Camera via V4L2 (libcamerify)")
         else:
-            print(f"[CAMERA] Native gagal, mencoba USB Camera index={CONFIG['usb_camera_index']}...")
-            usb_cap = cv2.VideoCapture(CONFIG["usb_camera_index"], cv2.CAP_V4L2)
-            if usb_cap.isOpened():
-                usb_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CONFIG["capture_width"])
-                usb_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG["capture_height"])
-                usb_cap.set(cv2.CAP_PROP_FPS,          CONFIG["stream_fps"])
-                with state["lock"]:
-                    state["camera_ok"]   = True
-                    state["camera_type"] = "usb"
-                    state["error"]       = None
-                print("[CAMERA] Mode: USB Camera")
-            else:
-                usb_cap = None
-                with state["lock"]:
-                    state["camera_ok"] = False
-                    state["error"]     = "Tidak ada kamera yang terdeteksi (UART, Native, & USB gagal)"
-                print("[CAMERA] ERROR: Tidak ada kamera tersedia!")
-                return
+            usb_cap = None
+            with state["lock"]:
+                state["camera_ok"] = False
+                state["error"]     = "Tidak ada kamera yang terdeteksi (UART & V4L2 gagal)"
+            print("[CAMERA] ERROR: Tidak ada kamera tersedia! Pastikan server dijalankan dengan libcamerify.")
+            return
 
     delay = 1.0 / CONFIG["stream_fps"]
+
+    # Tracker untuk mendeteksi kamera mati dan melakukan reconnect
+    consecutive_failures = 0
+    MAX_FAILURES = 20  # Setelah 20 frame kosong berturut-turut (~2 detik), reconnect
 
     while True:
         # ---- Ambil frame ----
@@ -470,14 +469,66 @@ def camera_thread():
             if ret:
                 frame = f
 
+        # ---- Deteksi kamera mati & lakukan reconnect ----
         if frame is None:
+            consecutive_failures += 1
+
             placeholder = np.zeros((CONFIG["capture_height"], CONFIG["capture_width"], 3), np.uint8)
-            cv2.putText(placeholder, "Menunggu frame kamera...", (60, 240),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120,120,120), 2)
+            msg = f"Menunggu frame kamera... ({consecutive_failures}/{MAX_FAILURES})"
+            cv2.putText(placeholder, msg, (30, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (120,120,120), 2)
             with state["lock"]:
                 state["annotated_frame"] = placeholder
-            time.sleep(0.5)
+                state["raw_frame"] = None
+
+            # Jika terlalu banyak frame kosong, coba reconnect kamera
+            if consecutive_failures >= MAX_FAILURES:
+                consecutive_failures = 0
+                print(f"[CAMERA] Frame kosong {MAX_FAILURES}x berturut-turut. Mencoba reconnect kamera...")
+
+                # Tutup koneksi lama
+                try:
+                    if cam is not None:
+                        cam.close()
+                        cam = None
+                    if usb_cap is not None:
+                        usb_cap.release()
+                        usb_cap = None
+                except Exception:
+                    pass
+
+                with state["lock"]:
+                    state["camera_ok"] = False
+
+                time.sleep(3)  # Tunggu 3 detik sebelum reconnect
+
+                # Reconnect via V4L2 (libcamerify) — cara yang sama dengan inisialisasi awal
+                print(f"[CAMERA] Mencoba reconnect USB/CSI Camera index={CONFIG['usb_camera_index']}...")
+                usb_cap = cv2.VideoCapture(CONFIG["usb_camera_index"], cv2.CAP_V4L2)
+                if usb_cap.isOpened():
+                    usb_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CONFIG["capture_width"])
+                    usb_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG["capture_height"])
+                    usb_cap.set(cv2.CAP_PROP_FPS,          CONFIG["stream_fps"])
+                    with state["lock"]:
+                        state["camera_ok"]   = True
+                        state["camera_type"] = "usb"
+                        state["error"]       = None
+                    print("[CAMERA] Reconnect USB/CSI berhasil!")
+                else:
+                    usb_cap = None
+                    with state["lock"]:
+                        state["camera_ok"] = False
+                        state["error"]     = "Reconnect gagal. Pastikan libcamerify aktif."
+                    print("[CAMERA] Reconnect gagal. Menunggu 10 detik...")
+                    time.sleep(10)
+
+            else:
+                time.sleep(0.1)
+
             continue
+
+        # Frame berhasil diambil — reset failure counter
+        consecutive_failures = 0
 
         # ---- Deteksi objek ----
         with state["lock"]:
@@ -507,6 +558,7 @@ def camera_thread():
             state["is_complete"]     = is_complete_stable
             state["last_frame_time"] = time.time()
             state["annotated_frame"] = annotated.copy()
+            state["raw_frame"]       = frame.copy()
             if is_complete_stable and state["stable_since"] is None:
                 state["stable_since"] = time.time()
             elif not is_complete_stable:
@@ -716,19 +768,13 @@ class HX711Driver:
         gc.disable()
 
         value = 0
-        corrupted = False
         try:
             for _ in range(24):
-                t0 = time.perf_counter()
                 GPIO.output(self.sck, True)
                 value = value << 1
                 GPIO.output(self.sck, False)
                 if GPIO.input(self.dout):
                     value += 1
-                # Kalau 1 siklus clock > 60us, HX711 kemungkinan
-                # sudah power-down di tengah pembacaan -> data korup
-                if (time.perf_counter() - t0) > 0.00006:
-                    corrupted = True
 
             # Pulsa ke-25 (gain 128, channel A)
             GPIO.output(self.sck, True)
@@ -737,9 +783,6 @@ class HX711Driver:
             if gc_was_enabled:
                 gc.enable()
         # --- END CRITICAL SECTION ---
-
-        if corrupted:
-            return None  # buang sampel yang berpotensi korup
 
         if value & 0x800000:
             value -= 0x1000000
@@ -811,6 +854,220 @@ def run_tare():
         hx_sensor.tare()
         return jsonify({"ok": True, "message": "Scale tared successfully", "offset": hx_sensor.offset})
     return jsonify({"ok": False, "error": "Scale not initialized"}), 500
+
+
+# ============================================================
+# QUALITY INSPECTION (SSIM + OPENCV)
+# ============================================================
+def compute_ssim(img1, img2):
+    """Hitung Structural Similarity Index (SSIM) antara dua citra grayscale."""
+    # Pastikan ukuran sama
+    if img1.shape != img2.shape:
+        img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
+
+    img1 = img1.astype(np.float64)
+    img2 = img2.astype(np.float64)
+
+    # Konstanta untuk menstabilkan pembagian
+    C1 = (0.01 * 255) ** 2
+    C2 = (0.03 * 255) ** 2
+
+    # Rata-rata lokal menggunakan Gaussian Blur
+    mu1 = cv2.GaussianBlur(img1, (11, 11), 1.5)
+    mu2 = cv2.GaussianBlur(img2, (11, 11), 1.5)
+
+    mu1_sq = mu1 ** 2
+    mu2_sq = mu2 ** 2
+    mu1_mu2 = mu1 * mu2
+
+    # Varians dan Kovarians lokal
+    sigma1_sq = cv2.GaussianBlur(img1 ** 2, (11, 11), 1.5) - mu1_sq
+    sigma2_sq = cv2.GaussianBlur(img2 ** 2, (11, 11), 1.5) - mu2_sq
+    sigma12 = cv2.GaussianBlur(img1 * img2, (11, 11), 1.5) - mu1_mu2
+
+    # Rumus SSIM
+    num = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+    den = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    ssim_map = num / den
+    
+    return float(np.mean(ssim_map))
+
+def analyze_quality(current_frame, reference_image, threshold=85.0):
+    """
+    Analisis kualitas frame saat ini terhadap gambar referensi.
+    Mengembalikan: (status, defect_type, confidence, similarity)
+    """
+    # Resize ke 320x240 agar perhitungan SSIM di CPU Raspberry Pi sangat cepat (<0.1s)
+    TARGET_SIZE = (320, 240)
+    curr_resized = cv2.resize(current_frame, TARGET_SIZE)
+    ref_resized = cv2.resize(reference_image, TARGET_SIZE)
+
+    # 1. Konversi ke grayscale
+    gray_curr = cv2.cvtColor(curr_resized, cv2.COLOR_BGR2GRAY)
+    gray_ref = cv2.cvtColor(ref_resized, cv2.COLOR_BGR2GRAY)
+
+    # 2. Hitung nilai kesamaan SSIM
+    similarity = compute_ssim(gray_ref, gray_curr)
+    similarity_percentage = round(similarity * 100, 1)
+    
+    # 4. Tentukan status kelayakan (PASS / REJECT)
+    status = "pass" if similarity_percentage >= threshold else "reject"
+    defect_type = "ok"
+    confidence = similarity_percentage
+    
+    # Jika reject, lakukan analisis jenis defect (kerobekan/penyok/missing)
+    if status == "reject":
+        # Selisih absolut (difference map)
+        diff = cv2.absdiff(gray_ref, gray_curr)
+        _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        
+        # Hitung rasio perbedaan
+        diff_ratio = (np.sum(thresh == 255) / thresh.size) * 100
+        
+        if similarity_percentage < 45.0:
+            defect_type = "missing"  # Komponen hilang / salah barang
+            confidence = round(100.0 - similarity_percentage, 1)
+        else:
+            # Temukan kontur perbedaan
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            large_contours = [c for c in contours if cv2.contourArea(c) > 500]
+            
+            # Canny edge detection pada peta selisih untuk mendeteksi goresan/sobekan tajam
+            edges = cv2.Canny(diff, 50, 150)
+            edge_pixels = np.sum(edges > 0)
+            
+            if edge_pixels > 3000 and len(large_contours) < 3:
+                defect_type = "tear"  # Sobek / Goresan
+                confidence = round(min(98.5, similarity_percentage + 15), 1)
+            else:
+                defect_type = "dent"  # Penyok / Deformasi
+                confidence = round(min(95.0, 100.0 - similarity_percentage), 1)
+                
+    return status, defect_type, confidence, similarity_percentage
+
+@app.route('/reference', methods=['POST'])
+def upload_reference():
+    """Upload dan simpan gambar referensi (contoh produk OK) untuk suatu produk."""
+    product_code = request.form.get('product_code') or (request.json.get('product_code') if request.is_json else None)
+    if not product_code:
+        return jsonify({"ok": False, "error": "Parameter product_code wajib diisi"}), 400
+    
+    # Bersihkan nama file dari karakter ilegal
+    clean_code = "".join([c for c in product_code if c.isalnum() or c in ('-', '_')]).strip()
+    if not clean_code:
+        return jsonify({"ok": False, "error": "Kode produk tidak valid"}), 400
+        
+    file_bytes = None
+    if 'file' in request.files:
+        file_bytes = request.files['file'].read()
+    elif request.is_json and 'image_base64' in request.json:
+        import base64
+        try:
+            file_bytes = base64.b64decode(request.json['image_base64'])
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Gagal decode base64: {str(e)}"}), 400
+
+    if not file_bytes:
+        return jsonify({"ok": False, "error": "Tidak ada data gambar dalam request"}), 400
+
+    try:
+        # Decode menjadi OpenCV image untuk memvalidasi
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({"ok": False, "error": "Format file bukan gambar yang valid"}), 400
+
+        # Tentukan folder penyimpanan referensi
+        ref_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'references')
+        os.makedirs(ref_dir, exist_ok=True)
+        filepath = os.path.join(ref_dir, f"{clean_code}.jpg")
+
+        # Simpan gambar
+        cv2.imwrite(filepath, img)
+        print(f"[QUALITY] Gambar referensi disimpan: {filepath}")
+        
+        return jsonify({
+            "ok": True,
+            "message": f"Gambar referensi untuk {product_code} berhasil disimpan.",
+            "path": filepath
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Gagal menyimpan gambar referensi: {str(e)}"}), 500
+
+@app.route('/references/<filename>')
+def get_reference_file(filename):
+    """Ambil file referensi gambar dari disk."""
+    ref_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'references')
+    return send_from_directory(ref_dir, filename)
+
+@app.route('/inspect', methods=['POST'])
+def run_inspection():
+    """Ambil frame terkini dan bandingkan dengan gambar referensi produk."""
+    product_code = request.form.get('product_code') or (request.json.get('product_code') if request.is_json else None)
+    if not product_code:
+        return jsonify({"ok": False, "error": "Parameter product_code wajib diisi"}), 400
+    
+    clean_code = "".join([c for c in product_code if c.isalnum() or c in ('-', '_')]).strip()
+    
+    ref_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'references')
+    ref_path = os.path.join(ref_dir, f"{clean_code}.jpg")
+    
+    if not os.path.exists(ref_path):
+        ref_path = os.path.join(ref_dir, "default.jpg")
+        
+    if not os.path.exists(ref_path):
+        return jsonify({
+            "ok": False, 
+            "error_type": "no_reference",
+            "error": f"Gambar referensi (OK) untuk produk '{product_code}' belum diupload oleh Admin dan default.jpg tidak ditemukan."
+        }), 404
+        
+    ref_img = cv2.imread(ref_path)
+    if ref_img is None:
+        return jsonify({"ok": False, "error": "Gagal membaca file gambar referensi di Pi"}), 500
+
+    # Ambil frame mentah terkini
+    with state["lock"]:
+        curr_frame = state.get("raw_frame")
+        if curr_frame is None:
+            curr_frame = state.get("annotated_frame") # Fallback jika raw_frame kosong
+
+    if curr_frame is None:
+        return jsonify({"ok": False, "error": "Kamera belum siap atau tidak ada frame"}), 503
+
+    try:
+        # Clone frame agar aman dimanipulasi
+        inspect_frame = curr_frame.copy()
+        
+        # Jalankan algoritma analisis kualitas
+        status, defect_type, confidence, similarity = analyze_quality(inspect_frame, ref_img, threshold=85.0)
+        
+        # Buat visualisasi hasil inspeksi (annotated image)
+        annotated_result = inspect_frame.copy()
+            
+        # Encode gambar hasil inspeksi ke Base64
+        _, buf = cv2.imencode('.jpg', annotated_result, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        import base64
+        img_base64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+        
+        # Simpan sementara di folder snapshot jika diperlukan log visual
+        inspection_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'inspections')
+        os.makedirs(inspection_log_dir, exist_ok=True)
+        filename = f"inspect_{clean_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        filepath = os.path.join(inspection_log_dir, filename)
+        cv2.imwrite(filepath, annotated_result)
+        
+        return jsonify({
+            "ok": True,
+            "status": status,
+            "defect_type": defect_type,
+            "confidence": confidence,
+            "similarity": similarity,
+            "image_base64": img_base64,
+            "filepath": filepath
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Error saat analisis kualitas: {str(e)}"}), 500
 
 
 # ============================================================

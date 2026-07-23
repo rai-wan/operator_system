@@ -44,4 +44,7 @@ Route::prefix('vision')->group(function () {
     Route::post('/config',    [VisionController::class, 'sendConfig']);
     Route::post('/reset',     [VisionController::class, 'reset']);
     Route::post('/tare',      [VisionController::class, 'tare']);
+    Route::post('/inspect',   [VisionController::class, 'inspect']);
+    Route::post('/reference', [VisionController::class, 'reference']);
+    Route::get('/reference-image/{product_code}', [VisionController::class, 'getReferenceImage']);
 });

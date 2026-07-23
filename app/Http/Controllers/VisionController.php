@@ -152,4 +152,85 @@ class VisionController extends Controller
             ], 500);
         }
     }
+
+    /**
+     * POST /vision/inspect
+     * Minta Pi melakukan inspeksi visual terhadap produk tertentu.
+     */
+    public function inspect(Request $request)
+    {
+        $request->validate([
+            'product_code' => 'required|string',
+        ]);
+
+        try {
+            $response = Http::timeout(15)->post($this->piUrl('/inspect'), [
+                'product_code' => $request->product_code,
+            ]);
+
+            return response()->json($response->json(), $response->status());
+        } catch (\Exception $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Gagal melakukan inspeksi di Raspberry Pi: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * POST /vision/reference
+     * Minta Pi menyimpan gambar referensi untuk produk.
+     */
+    public function reference(Request $request)
+    {
+        $request->validate([
+            'product_code' => 'required|string',
+            'image_base64' => 'required|string',
+        ]);
+
+        try {
+            $response = Http::timeout(10)->post($this->piUrl('/reference'), [
+                'product_code' => $request->product_code,
+                'image_base64' => $request->image_base64,
+            ]);
+
+            return response()->json($response->json(), $response->status());
+        } catch (\Exception $e) {
+            return response()->json([
+                'ok'    => false,
+                'error' => 'Gagal mengirim gambar referensi ke Raspberry Pi: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * GET /vision/reference-image/{product_code}
+     * Ambil foto referensi dari Pi dan kembalikan ke browser.
+     */
+    public function getReferenceImage($product_code)
+    {
+        $clean = preg_replace('/[^a-zA-Z0-9\-_]/', '', $product_code);
+        try {
+            $response = Http::timeout(3)->get($this->piUrl("/references/{$clean}.jpg"));
+            if ($response->successful()) {
+                return response($response->body(), 200)
+                    ->header('Content-Type', 'image/jpeg');
+            }
+            // Fallback ke default.jpg di Pi
+            $defaultResp = Http::timeout(3)->get($this->piUrl("/references/default.jpg"));
+            if ($defaultResp->successful()) {
+                return response($defaultResp->body(), 200)
+                    ->header('Content-Type', 'image/jpeg');
+            }
+        } catch (\Exception $e) {}
+
+        // Fallback lokal jika Pi offline
+        $localDefault = public_path('images/default_reference.jpg');
+        if (file_exists($localDefault)) {
+            return response()->file($localDefault, ['Content-Type' => 'image/jpeg']);
+        }
+
+        return response(base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='), 404)
+            ->header('Content-Type', 'image/png');
+    }
 }
